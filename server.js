@@ -521,6 +521,10 @@ app.get("/print/status", async (req, res) => {
 // =============================================
 // HEALTH CHECK
 // =============================================
+// Printers – chỉ hoạt động qua Print Bridge, trả về rỗng trên cloud
+app.get("/printers", (req, res) => {
+  res.json([]);
+});
 
 app.get("/health", (req, res) => res.json({ ok: true, time: new Date() }));
 
