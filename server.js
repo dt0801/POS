@@ -7,6 +7,31 @@ const cloudinary  = require("cloudinary").v2;
 const streamifier = require("streamifier");
 const http        = require("http");
 const { WebSocketServer, WebSocket } = require("ws");
+const bcrypt      = require("bcryptjs");
+const jwt         = require("jsonwebtoken");
+
+const JWT_SECRET = process.env.JWT_SECRET || "bbq-pos-jwt-secret-2024";
+
+// ── Middleware xác thực JWT ──────────────────
+function authMiddleware(req, res, next) {
+  const token = req.headers["authorization"]?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Chưa đăng nhập" });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: "Token không hợp lệ hoặc đã hết hạn" });
+  }
+}
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Không có quyền thực hiện thao tác này" });
+    }
+    next();
+  };
+}
 
 // =============================================
 // CONFIG
@@ -140,8 +165,105 @@ async function initDb() {
   for (const [k, v] of defaults) {
     await db.run("INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING", [k, v]);
   }
+  await db.run(`CREATE TABLE IF NOT EXISTS users (
+    id         SERIAL PRIMARY KEY,
+    username   TEXT UNIQUE NOT NULL,
+    password   TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'waiter',
+    full_name  TEXT,
+    active     BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW()
+  )`);
+
+  // Admin mac dinh
+  const adminExists = await db.get("SELECT id FROM users WHERE username='admin'");
+  if (!adminExists) {
+    const hash = await bcrypt.hash("admin123", 10);
+    await db.run(
+      "INSERT INTO users (username,password,role,full_name) VALUES ($1,$2,'admin','Administrator')",
+      ["admin", hash]
+    );
+    console.log("Tao tai khoan admin mac dinh: admin / admin123");
+  }
   console.log("✅ DB initialized");
 }
+
+
+// =============================================
+// AUTH APIs
+// =============================================
+
+app.post("/auth/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: "Thiếu username/password" });
+    const user = await db.get("SELECT * FROM users WHERE username=$1 AND active=true", [username]);
+    if (!user) return res.status(401).json({ error: "Tài khoản không tồn tại hoặc đã bị khóa" });
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ error: "Mật khẩu không đúng" });
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role, full_name: user.full_name },
+      JWT_SECRET,
+      { expiresIn: "12h" }
+    );
+    res.json({ token, user: { id: user.id, username: user.username, role: user.role, full_name: user.full_name } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/auth/me", authMiddleware, (req, res) => {
+  res.json(req.user);
+});
+
+// =============================================
+// USER MANAGEMENT APIs (Admin only)
+// =============================================
+
+app.get("/users", authMiddleware, requireRole("admin"), async (req, res) => {
+  try {
+    res.json(await db.all("SELECT id,username,role,full_name,active,created_at FROM users ORDER BY id"));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/users", authMiddleware, requireRole("admin"), async (req, res) => {
+  try {
+    const { username, password, role, full_name } = req.body;
+    if (!username || !password || !role) return res.status(400).json({ error: "Thiếu thông tin" });
+    if (!["admin","cashier","waiter"].includes(role)) return res.status(400).json({ error: "Role không hợp lệ" });
+    const hash = await bcrypt.hash(password, 10);
+    await db.run(
+      "INSERT INTO users (username,password,role,full_name) VALUES ($1,$2,$3,$4)",
+      [username, hash, role, full_name || username]
+    );
+    res.json({ created: true });
+  } catch (e) {
+    if (e.code === "23505") return res.status(409).json({ error: "Username đã tồn tại" });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/users/:id", authMiddleware, requireRole("admin"), async (req, res) => {
+  try {
+    const { full_name, role, active, password } = req.body;
+    const id = req.params.id;
+    if (password) {
+      const hash = await bcrypt.hash(password, 10);
+      await db.run("UPDATE users SET full_name=$1,role=$2,active=$3,password=$4 WHERE id=$5",
+        [full_name, role, active, hash, id]);
+    } else {
+      await db.run("UPDATE users SET full_name=$1,role=$2,active=$3 WHERE id=$4",
+        [full_name, role, active, id]);
+    }
+    res.json({ updated: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/users/:id", authMiddleware, requireRole("admin"), async (req, res) => {
+  try {
+    if (req.user.id === Number(req.params.id)) return res.status(400).json({ error: "Không thể xóa chính mình" });
+    await db.run("DELETE FROM users WHERE id=$1", [req.params.id]);
+    res.json({ deleted: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // =============================================
 // MENU APIs
@@ -152,7 +274,7 @@ app.get("/menu", async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/menu", upload.single("image"), async (req, res) => {
+app.post("/menu", authMiddleware, requireRole("admin","cashier"), upload.single("image"), async (req, res) => {
   try {
     const { name, price, type } = req.body;
     let imageUrl = "";
@@ -168,7 +290,7 @@ app.post("/menu", upload.single("image"), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put("/menu/:id", upload.single("image"), async (req, res) => {
+app.put("/menu/:id", authMiddleware, requireRole("admin","cashier"), upload.single("image"), async (req, res) => {
   try {
     const { name, price, type } = req.body;
     const { id } = req.params;
@@ -185,7 +307,7 @@ app.put("/menu/:id", upload.single("image"), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete("/menu/:id", async (req, res) => {
+app.delete("/menu/:id", authMiddleware, requireRole("admin"), async (req, res) => {
   try { await db.run("DELETE FROM menu WHERE id=$1", [req.params.id]); res.json({ deleted: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -246,7 +368,7 @@ app.delete("/tables/:num", async (req, res) => {
 // BILLS APIs
 // =============================================
 
-app.post("/bills", async (req, res) => {
+app.post("/bills", authMiddleware, requireRole("admin","cashier"), async (req, res) => {
   const client = await pool.connect();
   try {
     const { table_num, total, items } = req.body;
@@ -336,7 +458,7 @@ app.get("/settings", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/settings", async (req, res) => {
+app.post("/settings", authMiddleware, requireRole("admin"), async (req, res) => {
   try {
     const { key, value } = req.body;
     if (!key) return res.status(400).json({ error: "Missing key" });
