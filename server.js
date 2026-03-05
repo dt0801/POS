@@ -128,13 +128,16 @@ const posWss = new WebSocketServer({ server, path: "/pos" });
 const posClients = new Set();
 
 posWss.on("connection", (ws, req) => {
-  // Xác thực token qua query string
+  // Parse token từ query string — dùng cách đơn giản hơn để tránh lỗi URL parse
   try {
-    const token = new URL(req.url, "http://localhost").searchParams.get("token");
+    const rawUrl = req.url || "";
+    const match  = rawUrl.match(/[?&]token=([^&]+)/);
+    const token  = match ? decodeURIComponent(match[1]) : null;
     if (!token) { ws.close(1008, "Unauthorized"); return; }
     const user = jwt.verify(token, JWT_SECRET);
     ws.posUser = user;
-  } catch {
+  } catch (e) {
+    console.error("POS WS auth error:", e.message);
     ws.close(1008, "Invalid token");
     return;
   }
@@ -144,7 +147,7 @@ posWss.on("connection", (ws, req) => {
     posClients.delete(ws);
     console.log(`⚠️  POS client ngắt kết nối. Còn: ${posClients.size}`);
   });
-  ws.on("error", () => posClients.delete(ws));
+  ws.on("error", (e) => { console.error("POS WS error:", e.message); posClients.delete(ws); });
 });
 
 function broadcastToPos(payload) {
