@@ -90,27 +90,50 @@ const db = {
 };
 
 // =============================================
-// WEBSOCKET TUNNEL – Print Bridge
+// WEBSOCKET – Print Bridge + POS Realtime (1 server, route by path)
 // =============================================
 
-const wss = new WebSocketServer({ server, path: "/bridge" });
+const wss = new WebSocketServer({ server });
 const bridgeClients = new Set();
+const posClients    = new Set();
 
 wss.on("connection", (ws, req) => {
-  const secret = new URL(req.url, "http://localhost").searchParams.get(
-    "secret",
-  );
-  if (secret !== process.env.PRINT_BRIDGE_SECRET) {
-    ws.close(1008, "Unauthorized");
+  const rawUrl = req.url || "";
+  const path   = rawUrl.split("?")[0];
+
+  // ── /bridge — Print Bridge ──────────────────
+  if (path === "/bridge") {
+    const secret = rawUrl.match(/[?&]secret=([^&]+)/)?.[1];
+    if (secret !== process.env.PRINT_BRIDGE_SECRET) {
+      ws.close(1008, "Unauthorized"); return;
+    }
+    bridgeClients.add(ws);
+    console.log(`✅ Print Bridge kết nối. Tổng: ${bridgeClients.size}`);
+    ws.on("close", () => { bridgeClients.delete(ws); console.log(`⚠️  Print Bridge ngắt. Còn: ${bridgeClients.size}`); });
+    ws.on("error", () => bridgeClients.delete(ws));
     return;
   }
-  bridgeClients.add(ws);
-  console.log(`✅ Print Bridge kết nối. Tổng: ${bridgeClients.size}`);
-  ws.on("close", () => {
-    bridgeClients.delete(ws);
-    console.log(`⚠️  Print Bridge ngắt kết nối. Còn: ${bridgeClients.size}`);
-  });
-  ws.on("error", () => bridgeClients.delete(ws));
+
+  // ── /pos — POS Realtime Sync ─────────────────
+  if (path === "/pos") {
+    try {
+      const tokenMatch = rawUrl.match(/[?&]token=([^&]+)/);
+      const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : null;
+      if (!token) { ws.close(1008, "Unauthorized"); return; }
+      ws.posUser = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      console.error("POS WS auth error:", e.message);
+      ws.close(1008, "Invalid token"); return;
+    }
+    posClients.add(ws);
+    console.log(`✅ POS client: ${ws.posUser.username} (${ws.posUser.role}). Tổng: ${posClients.size}`);
+    ws.on("close", () => { posClients.delete(ws); console.log(`⚠️  POS client ngắt. Còn: ${posClients.size}`); });
+    ws.on("error", (e) => { console.error("POS WS error:", e.message); posClients.delete(ws); });
+    return;
+  }
+
+  // Unknown path
+  ws.close(1008, "Unknown path");
 });
 
 function broadcastToBridges(payload) {
@@ -120,35 +143,12 @@ function broadcastToBridges(payload) {
   }
 }
 
-// =============================================
-// WEBSOCKET – POS Realtime Sync
-// =============================================
-
-const posWss = new WebSocketServer({ server, path: "/pos" });
-const posClients = new Set();
-
-posWss.on("connection", (ws, req) => {
-  // Parse token từ query string — dùng cách đơn giản hơn để tránh lỗi URL parse
-  try {
-    const rawUrl = req.url || "";
-    const match  = rawUrl.match(/[?&]token=([^&]+)/);
-    const token  = match ? decodeURIComponent(match[1]) : null;
-    if (!token) { ws.close(1008, "Unauthorized"); return; }
-    const user = jwt.verify(token, JWT_SECRET);
-    ws.posUser = user;
-  } catch (e) {
-    console.error("POS WS auth error:", e.message);
-    ws.close(1008, "Invalid token");
-    return;
+function broadcastToPos(payload) {
+  const msg = JSON.stringify(payload);
+  for (const ws of posClients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
   }
-  posClients.add(ws);
-  console.log(`✅ POS client kết nối: ${ws.posUser.username} (${ws.posUser.role}). Tổng: ${posClients.size}`);
-  ws.on("close", () => {
-    posClients.delete(ws);
-    console.log(`⚠️  POS client ngắt kết nối. Còn: ${posClients.size}`);
-  });
-  ws.on("error", (e) => { console.error("POS WS error:", e.message); posClients.delete(ws); });
-});
+}
 
 function broadcastToPos(payload) {
   const msg = JSON.stringify(payload);
