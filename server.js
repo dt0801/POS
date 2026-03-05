@@ -120,6 +120,40 @@ function broadcastToBridges(payload) {
   }
 }
 
+// =============================================
+// WEBSOCKET – POS Realtime Sync
+// =============================================
+
+const posWss = new WebSocketServer({ server, path: "/pos" });
+const posClients = new Set();
+
+posWss.on("connection", (ws, req) => {
+  // Xác thực token qua query string
+  try {
+    const token = new URL(req.url, "http://localhost").searchParams.get("token");
+    if (!token) { ws.close(1008, "Unauthorized"); return; }
+    const user = jwt.verify(token, JWT_SECRET);
+    ws.posUser = user;
+  } catch {
+    ws.close(1008, "Invalid token");
+    return;
+  }
+  posClients.add(ws);
+  console.log(`✅ POS client kết nối: ${ws.posUser.username} (${ws.posUser.role}). Tổng: ${posClients.size}`);
+  ws.on("close", () => {
+    posClients.delete(ws);
+    console.log(`⚠️  POS client ngắt kết nối. Còn: ${posClients.size}`);
+  });
+  ws.on("error", () => posClients.delete(ws));
+});
+
+function broadcastToPos(payload) {
+  const msg = JSON.stringify(payload);
+  for (const ws of posClients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
+}
+
 async function createPrintJob(jobType, billId, payload) {
   const row = await db.get(
     "INSERT INTO print_jobs (bill_id, job_type, payload) VALUES ($1,$2,$3) RETURNING *",
@@ -432,10 +466,14 @@ app.get("/tables", async (req, res) => {
 
 app.post("/tables/:num/status", async (req, res) => {
   try {
+    const num = Number(req.params.num);
+    const { status } = req.body;
     await db.run(
       "INSERT INTO tables (table_num,status) VALUES ($1,$2) ON CONFLICT (table_num) DO UPDATE SET status=$2",
-      [Number(req.params.num), req.body.status],
+      [num, status],
     );
+    // Realtime: thông báo tất cả POS clients
+    broadcastToPos({ event: "TABLE_STATUS", table_num: num, status });
     res.json({ updated: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -523,6 +561,8 @@ app.post(
         [table_num],
       );
       await client.query("COMMIT");
+      // Realtime: thông báo thanh toán xong → tất cả thiết bị biết bàn đã PAID
+      broadcastToPos({ event: "BILL_PAID", table_num, bill_id: billId });
       res.json({ bill_id: billId });
     } catch (e) {
       await client.query("ROLLBACK");
