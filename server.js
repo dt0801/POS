@@ -643,14 +643,14 @@ app.get("/bills/:id", async (req, res) => {
 
 app.get("/stats/today", async (req, res) => {
   try {
-    const today = new Date().toISOString().split("T")[0];
+    const date = req.query.date || new Date().toISOString().split("T")[0];
     const summary = await db.get(
       `SELECT COUNT(*) AS bill_count, COALESCE(SUM(total),0) AS revenue FROM bills WHERE created_at::date=$1`,
-      [today],
+      [date],
     );
     const topItems = await db.all(
       `SELECT bi.name, SUM(bi.qty) AS total_qty, SUM(bi.price*bi.qty) AS total_revenue FROM bill_items bi JOIN bills b ON b.id=bi.bill_id WHERE b.created_at::date=$1 GROUP BY bi.name ORDER BY total_qty DESC LIMIT 5`,
-      [today],
+      [date],
     );
     res.json({ ...summary, top_items: topItems });
   } catch (e) {
