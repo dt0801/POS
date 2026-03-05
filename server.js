@@ -181,6 +181,8 @@ async function initDb() {
     name TEXT, price INTEGER, qty INTEGER)`);
   await db.run(`CREATE TABLE IF NOT EXISTS tables (
     table_num INTEGER PRIMARY KEY, status TEXT DEFAULT 'PAID')`);
+  // Thêm cột orders nếu chưa có (migration an toàn)
+  await db.run(`ALTER TABLE tables ADD COLUMN IF NOT EXISTS orders JSONB DEFAULT '{}'`);
   await db.run(`CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY, value TEXT)`);
   await db.run(`CREATE TABLE IF NOT EXISTS print_printers (
@@ -462,6 +464,33 @@ app.delete(
 app.get("/tables", async (req, res) => {
   try {
     res.json(await db.all("SELECT * FROM tables"));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lấy orders của 1 bàn
+app.get("/tables/:num/orders", authMiddleware, async (req, res) => {
+  try {
+    const row = await db.get("SELECT orders FROM tables WHERE table_num=$1", [Number(req.params.num)]);
+    res.json(row?.orders || {});
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lưu orders của 1 bàn + broadcast realtime
+app.post("/tables/:num/orders", authMiddleware, async (req, res) => {
+  try {
+    const num    = Number(req.params.num);
+    const orders = req.body.orders || {};
+    await db.run(
+      "INSERT INTO tables (table_num, orders) VALUES ($1,$2) ON CONFLICT (table_num) DO UPDATE SET orders=$2",
+      [num, JSON.stringify(orders)],
+    );
+    // Broadcast để các thiết bị khác cập nhật ngay
+    broadcastToPos({ event: "ORDER_UPDATE", table_num: num, orders });
+    res.json({ saved: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
