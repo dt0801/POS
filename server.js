@@ -199,6 +199,9 @@ async function initDb() {
   // ── [MỚI] Migration: thêm cột cashier vào bills ──────────────────────────
   await db.run(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS cashier_id INTEGER`);
   await db.run(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS cashier_name VARCHAR(100)`);
+  // ── [FIX] Đổi cột total sang NUMERIC để chấp nhận số thập phân ────────────
+  await db.run(`ALTER TABLE bills ALTER COLUMN total TYPE NUMERIC`);
+  await db.run(`ALTER TABLE bill_items ALTER COLUMN price TYPE NUMERIC`);
 
   const defaults = [
     ["store_name", "Tiệm Nướng Đà Lạt Và Em"],
