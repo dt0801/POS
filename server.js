@@ -1026,6 +1026,23 @@ app.get("/print/status", (req, res) => {
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// ── [TEMP] Fix cashier_name NULL cho bill cũ ─────────────────────────────────
+// Gọi 1 lần: GET /admin/fix-cashier?secret=bbqfix2026
+// Sau khi chạy xong nên xóa endpoint này
+app.get("/admin/fix-cashier", authMiddleware, requireRole("admin"), async (req, res) => {
+  try {
+    const adminUser = await db.get(`SELECT id, username FROM users WHERE username = 'admin' LIMIT 1`);
+    if (!adminUser) return res.status(404).json({ error: "Admin user not found" });
+    const result = await db.run(
+      `UPDATE bills SET cashier_id = $1, cashier_name = $2 WHERE cashier_name IS NULL`,
+      [adminUser.id, adminUser.username]
+    );
+    res.json({ message: "Fixed", updated: result.changes || 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // =============================================
 // START
 // =============================================
