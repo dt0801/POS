@@ -720,7 +720,7 @@ app.get("/stats/yearly", async (req, res) => {
 });
 
 // ── [MỚI] Thống kê nhân viên theo NGÀY ──────────────────────────────────────
-app.get("/stats/staff/day", authMiddleware, async (req, res) => {
+app.get("/stats/staff/day", async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().split("T")[0];
     const rows = await db.all(
@@ -739,7 +739,7 @@ app.get("/stats/staff/day", authMiddleware, async (req, res) => {
 });
 
 // ── [MỚI] Thống kê nhân viên theo THÁNG ─────────────────────────────────────
-app.get("/stats/staff/month", authMiddleware, async (req, res) => {
+app.get("/stats/staff/month", async (req, res) => {
   try {
     const month = req.query.month || new Date().toISOString().slice(0, 7);
     const rows = await db.all(
@@ -758,7 +758,7 @@ app.get("/stats/staff/month", authMiddleware, async (req, res) => {
 });
 
 // ── [MỚI] Thống kê nhân viên theo NĂM ───────────────────────────────────────
-app.get("/stats/staff/year", authMiddleware, async (req, res) => {
+app.get("/stats/staff/year", async (req, res) => {
   try {
     const year = req.query.year || new Date().getFullYear().toString();
     const rows = await db.all(
