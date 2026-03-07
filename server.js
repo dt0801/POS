@@ -143,13 +143,7 @@ function broadcastToBridges(payload) {
   }
 }
 
-function broadcastToPos(payload) {
-  const msg = JSON.stringify(payload);
-  for (const ws of posClients) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-  }
-}
-
+// [FIX] Xóa bản khai báo trùng — chỉ giữ 1 broadcastToPos
 function broadcastToPos(payload) {
   const msg = JSON.stringify(payload);
   for (const ws of posClients) {
@@ -201,6 +195,10 @@ async function initDb() {
     error_message TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW())`);
+
+  // ── [MỚI] Migration: thêm cột cashier vào bills ──────────────────────────
+  await db.run(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS cashier_id INTEGER`);
+  await db.run(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS cashier_name VARCHAR(100)`);
 
   const defaults = [
     ["store_name", "Tiệm Nướng Đà Lạt Và Em"],
@@ -576,10 +574,16 @@ app.post(
     const client = await pool.connect();
     try {
       const { table_num, total, items } = req.body;
+
+      // ── [MỚI] Lấy thông tin cashier từ JWT ──────────────────────────────
+      const cashier_id   = req.user.id;
+      const cashier_name = req.user.full_name || req.user.username;
+
       await client.query("BEGIN");
       const r = await client.query(
-        "INSERT INTO bills (table_num,total) VALUES ($1,$2) RETURNING id",
-        [table_num, total],
+        // ── [MỚI] Lưu cashier vào bills ─────────────────────────────────────
+        "INSERT INTO bills (table_num, total, cashier_id, cashier_name) VALUES ($1,$2,$3,$4) RETURNING id",
+        [table_num, total, cashier_id, cashier_name],
       );
       const billId = r.rows[0].id;
       for (const item of items) {
@@ -610,7 +614,8 @@ app.get("/bills", async (req, res) => {
     const date = req.query.date || new Date().toISOString().split("T")[0];
     res.json(
       await db.all(
-        `SELECT b.id, b.table_num, b.total, b.created_at,
+        // ── [MỚI] Thêm cashier_name vào SELECT để hiển thị ở History ────────
+        `SELECT b.id, b.table_num, b.total, b.created_at, b.cashier_name,
               STRING_AGG(bi.name || ' x' || bi.qty, ', ' ORDER BY bi.id) AS items_summary
        FROM bills b LEFT JOIN bill_items bi ON bi.bill_id=b.id
        WHERE b.created_at::date=$1 GROUP BY b.id ORDER BY b.created_at DESC`,
@@ -712,6 +717,63 @@ app.get("/stats/yearly", async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── [MỚI] Thống kê nhân viên theo NGÀY ──────────────────────────────────────
+app.get("/stats/staff/day", authMiddleware, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split("T")[0];
+    const rows = await db.all(
+      `SELECT
+         COALESCE(cashier_name, 'Unknown') AS cashier_name,
+         COUNT(*)::int                     AS bill_count,
+         COALESCE(SUM(total), 0)::int      AS revenue
+       FROM bills
+       WHERE created_at::date = $1
+       GROUP BY cashier_name
+       ORDER BY bill_count DESC`,
+      [date],
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── [MỚI] Thống kê nhân viên theo THÁNG ─────────────────────────────────────
+app.get("/stats/staff/month", authMiddleware, async (req, res) => {
+  try {
+    const month = req.query.month || new Date().toISOString().slice(0, 7);
+    const rows = await db.all(
+      `SELECT
+         COALESCE(cashier_name, 'Unknown') AS cashier_name,
+         COUNT(*)::int                     AS bill_count,
+         COALESCE(SUM(total), 0)::int      AS revenue
+       FROM bills
+       WHERE TO_CHAR(created_at, 'YYYY-MM') = $1
+       GROUP BY cashier_name
+       ORDER BY bill_count DESC`,
+      [month],
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── [MỚI] Thống kê nhân viên theo NĂM ───────────────────────────────────────
+app.get("/stats/staff/year", authMiddleware, async (req, res) => {
+  try {
+    const year = req.query.year || new Date().getFullYear().toString();
+    const rows = await db.all(
+      `SELECT
+         COALESCE(cashier_name, 'Unknown') AS cashier_name,
+         COUNT(*)::int                     AS bill_count,
+         COALESCE(SUM(total), 0)::int      AS revenue
+       FROM bills
+       WHERE EXTRACT(YEAR FROM created_at) = $1
+       GROUP BY cashier_name
+       ORDER BY bill_count DESC`,
+      [year],
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // =============================================
