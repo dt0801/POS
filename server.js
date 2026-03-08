@@ -779,6 +779,7 @@ app.get("/stats/staff/year", async (req, res) => {
        FROM bills WHERE EXTRACT(YEAR FROM created_at)=$1 AND waiter_name IS NOT NULL GROUP BY waiter_name ORDER BY bill_count DESC`, [year]);
     res.json({ cashiers, waiters });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // =============================================
 // SETTINGS APIs
@@ -1068,4 +1069,3 @@ initDb()
     console.error("❌ DB init failed:", err);
     process.exit(1);
   });
-});
