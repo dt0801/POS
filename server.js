@@ -199,9 +199,19 @@ async function initDb() {
   // ── [MỚI] Migration: thêm cột cashier vào bills ──────────────────────────
   await db.run(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS cashier_id INTEGER`);
   await db.run(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS cashier_name VARCHAR(100)`);
+  // ── [MỚI] Thêm cột waiter vào bills ──────────────────────────────────────
+  await db.run(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS waiter_name VARCHAR(100)`);
   // ── [FIX] Đổi cột total sang NUMERIC để chấp nhận số thập phân ────────────
   await db.run(`ALTER TABLE bills ALTER COLUMN total TYPE NUMERIC`);
   await db.run(`ALTER TABLE bill_items ALTER COLUMN price TYPE NUMERIC`);
+  // ── [MỚI] Bảng lưu waiter theo bàn ──────────────────────────────────────
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS table_waiters (
+      table_num   INTEGER PRIMARY KEY,
+      waiter_name VARCHAR(100),
+      updated_at  TIMESTAMP DEFAULT NOW()
+    )
+  `);
 
   const defaults = [
     ["store_name", "Tiệm Nướng Đà Lạt Và Em"],
@@ -581,12 +591,17 @@ app.post(
       // ── [MỚI] Lấy thông tin cashier từ JWT ──────────────────────────────
       const cashier_id   = req.user.id;
       const cashier_name = req.user.full_name || req.user.username;
+      // ── [MỚI] Lấy waiter từ table_waiters ───────────────────────────────
+      const waiterRow    = await client.query(
+        `SELECT waiter_name FROM table_waiters WHERE table_num=$1`, [table_num]
+      );
+      const waiter_name  = waiterRow.rows[0]?.waiter_name || cashier_name;
 
       await client.query("BEGIN");
       const r = await client.query(
-        // ── [MỚI] Lưu cashier vào bills ─────────────────────────────────────
-        "INSERT INTO bills (table_num, total, cashier_id, cashier_name) VALUES ($1,$2,$3,$4) RETURNING id",
-        [table_num, total, cashier_id, cashier_name],
+        // ── [MỚI] Lưu cashier + waiter vào bills ────────────────────────────
+        "INSERT INTO bills (table_num, total, cashier_id, cashier_name, waiter_name) VALUES ($1,$2,$3,$4,$5) RETURNING id",
+        [table_num, total, cashier_id, cashier_name, waiter_name],
       );
       const billId = r.rows[0].id;
       for (const item of items) {
@@ -600,6 +615,8 @@ app.post(
         [table_num],
       );
       await client.query("COMMIT");
+      // Xóa waiter tracking cho bàn này sau khi thanh toán
+      await db.run(`DELETE FROM table_waiters WHERE table_num=$1`, [table_num]);
       // Realtime: thông báo thanh toán xong → tất cả thiết bị biết bàn đã PAID
       broadcastToPos({ event: "BILL_PAID", table_num, bill_id: billId });
       res.json({ bill_id: billId });
@@ -726,18 +743,13 @@ app.get("/stats/yearly", async (req, res) => {
 app.get("/stats/staff/day", async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().split("T")[0];
-    const rows = await db.all(
-      `SELECT
-         COALESCE(cashier_name, 'Unknown') AS cashier_name,
-         COUNT(*)::int                     AS bill_count,
-         COALESCE(SUM(total), 0)::int      AS revenue
-       FROM bills
-       WHERE created_at::date = $1
-       GROUP BY cashier_name
-       ORDER BY bill_count DESC`,
-      [date],
-    );
-    res.json(rows);
+    const cashiers = await db.all(
+      `SELECT COALESCE(cashier_name,'Unknown') AS name, COUNT(*)::int AS bill_count, COALESCE(SUM(total),0)::int AS revenue
+       FROM bills WHERE created_at::date=$1 GROUP BY cashier_name ORDER BY bill_count DESC`, [date]);
+    const waiters = await db.all(
+      `SELECT COALESCE(waiter_name,'Unknown') AS name, COUNT(*)::int AS bill_count, COALESCE(SUM(total),0)::int AS revenue
+       FROM bills WHERE created_at::date=$1 AND waiter_name IS NOT NULL GROUP BY waiter_name ORDER BY bill_count DESC`, [date]);
+    res.json({ cashiers, waiters });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -745,18 +757,13 @@ app.get("/stats/staff/day", async (req, res) => {
 app.get("/stats/staff/month", async (req, res) => {
   try {
     const month = req.query.month || new Date().toISOString().slice(0, 7);
-    const rows = await db.all(
-      `SELECT
-         COALESCE(cashier_name, 'Unknown') AS cashier_name,
-         COUNT(*)::int                     AS bill_count,
-         COALESCE(SUM(total), 0)::int      AS revenue
-       FROM bills
-       WHERE TO_CHAR(created_at, 'YYYY-MM') = $1
-       GROUP BY cashier_name
-       ORDER BY bill_count DESC`,
-      [month],
-    );
-    res.json(rows);
+    const cashiers = await db.all(
+      `SELECT COALESCE(cashier_name,'Unknown') AS name, COUNT(*)::int AS bill_count, COALESCE(SUM(total),0)::int AS revenue
+       FROM bills WHERE TO_CHAR(created_at,'YYYY-MM')=$1 GROUP BY cashier_name ORDER BY bill_count DESC`, [month]);
+    const waiters = await db.all(
+      `SELECT COALESCE(waiter_name,'Unknown') AS name, COUNT(*)::int AS bill_count, COALESCE(SUM(total),0)::int AS revenue
+       FROM bills WHERE TO_CHAR(created_at,'YYYY-MM')=$1 AND waiter_name IS NOT NULL GROUP BY waiter_name ORDER BY bill_count DESC`, [month]);
+    res.json({ cashiers, waiters });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -764,20 +771,14 @@ app.get("/stats/staff/month", async (req, res) => {
 app.get("/stats/staff/year", async (req, res) => {
   try {
     const year = req.query.year || new Date().getFullYear().toString();
-    const rows = await db.all(
-      `SELECT
-         COALESCE(cashier_name, 'Unknown') AS cashier_name,
-         COUNT(*)::int                     AS bill_count,
-         COALESCE(SUM(total), 0)::int      AS revenue
-       FROM bills
-       WHERE EXTRACT(YEAR FROM created_at) = $1
-       GROUP BY cashier_name
-       ORDER BY bill_count DESC`,
-      [year],
-    );
-    res.json(rows);
+    const cashiers = await db.all(
+      `SELECT COALESCE(cashier_name,'Unknown') AS name, COUNT(*)::int AS bill_count, COALESCE(SUM(total),0)::int AS revenue
+       FROM bills WHERE EXTRACT(YEAR FROM created_at)=$1 GROUP BY cashier_name ORDER BY bill_count DESC`, [year]);
+    const waiters = await db.all(
+      `SELECT COALESCE(waiter_name,'Unknown') AS name, COUNT(*)::int AS bill_count, COALESCE(SUM(total),0)::int AS revenue
+       FROM bills WHERE EXTRACT(YEAR FROM created_at)=$1 AND waiter_name IS NOT NULL GROUP BY waiter_name ORDER BY bill_count DESC`, [year]);
+    res.json({ cashiers, waiters });
   } catch (e) { res.status(500).json({ error: e.message }); }
-});
 
 // =============================================
 // SETTINGS APIs
@@ -946,11 +947,21 @@ app.post("/print/jobs/:id/retry", async (req, res) => {
 // PRINT COMMAND APIs
 // =============================================
 
-app.post("/print/kitchen", async (req, res) => {
+app.post("/print/kitchen", authMiddleware, async (req, res) => {
   try {
     const { bill_id, table_num, items, note } = req.body;
     if (!items || !items.length)
       return res.status(400).json({ error: "Thiếu items" });
+    // ── Lưu waiter theo bàn ────────────────────────────────────────────────
+    const waiter_name = req.user.full_name || req.user.username;
+    if (table_num) {
+      await db.run(
+        `INSERT INTO table_waiters (table_num, waiter_name, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (table_num) DO UPDATE SET waiter_name=$2, updated_at=NOW()`,
+        [table_num, waiter_name]
+      );
+    }
     const job = await createPrintJob("KITCHEN", bill_id || null, {
       table_num,
       items,
@@ -1057,3 +1068,4 @@ initDb()
     console.error("❌ DB init failed:", err);
     process.exit(1);
   });
+});
